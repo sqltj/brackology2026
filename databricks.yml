@@ -1,5 +1,5 @@
 bundle:
-  name: bracketology
+  name: brackology2026
 
 include:
   - resources/*.yml

@@ -1,4 +1,4 @@
-# Bracketology
+# Brackology 2026
 
 NCAA Men's Basketball Tournament prediction system built on Databricks. Uses ensemble ML models (Logistic Regression, XGBoost, Random Forest) trained on 10 years of tournament data (2016-2025) to predict every game in the 2026 bracket.
 
