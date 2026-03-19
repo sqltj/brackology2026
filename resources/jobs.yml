@@ -1,0 +1,106 @@
+resources:
+  jobs:
+    # ─── Individual notebook jobs (run standalone) ───────────────
+
+    data_ingestion:
+      name: "[${bundle.target}] Bracketology 01 - Data Ingestion"
+      tasks:
+        - task_key: "ingest"
+          notebook_task:
+            notebook_path: ../src/notebooks/01_setup_and_data_ingestion.py
+
+    exploratory_analysis:
+      name: "[${bundle.target}] Bracketology 02 - Exploratory Analysis"
+      tasks:
+        - task_key: "eda"
+          notebook_task:
+            notebook_path: ../src/notebooks/02_exploratory_analysis.py
+
+    feature_engineering:
+      name: "[${bundle.target}] Bracketology 03 - Feature Engineering"
+      tasks:
+        - task_key: "features"
+          notebook_task:
+            notebook_path: ../src/notebooks/03_feature_engineering.py
+
+    model_training:
+      name: "[${bundle.target}] Bracketology 04 - Model Training"
+      tasks:
+        - task_key: "train"
+          notebook_task:
+            notebook_path: ../src/notebooks/04_model_training_and_optimization.py
+
+    tournament_predictions:
+      name: "[${bundle.target}] Bracketology 05 - Tournament Predictions"
+      tasks:
+        - task_key: "predict"
+          notebook_task:
+            notebook_path: ../src/notebooks/05_tournament_predictions.py
+
+    round_update:
+      name: "[${bundle.target}] Bracketology 06 - Round Update"
+      tasks:
+        - task_key: "update"
+          notebook_task:
+            notebook_path: ../src/notebooks/06_round_update.py
+
+    bracket_picks:
+      name: "[${bundle.target}] Bracketology 07 - Bracket Picks"
+      tasks:
+        - task_key: "picks"
+          notebook_task:
+            notebook_path: ../src/notebooks/07_bracket_picks.py
+
+    # ─── Full pipeline: build everything from scratch ────────────
+
+    full_pipeline:
+      name: "[${bundle.target}] Bracketology - Full Pipeline"
+      tasks:
+        - task_key: "01_ingest"
+          notebook_task:
+            notebook_path: ../src/notebooks/01_setup_and_data_ingestion.py
+
+        - task_key: "02_eda"
+          depends_on:
+            - task_key: "01_ingest"
+          notebook_task:
+            notebook_path: ../src/notebooks/02_exploratory_analysis.py
+
+        - task_key: "03_features"
+          depends_on:
+            - task_key: "01_ingest"
+          notebook_task:
+            notebook_path: ../src/notebooks/03_feature_engineering.py
+
+        - task_key: "04_train"
+          depends_on:
+            - task_key: "03_features"
+          notebook_task:
+            notebook_path: ../src/notebooks/04_model_training_and_optimization.py
+
+        - task_key: "05_predict"
+          depends_on:
+            - task_key: "04_train"
+          notebook_task:
+            notebook_path: ../src/notebooks/05_tournament_predictions.py
+
+        - task_key: "07_picks"
+          depends_on:
+            - task_key: "05_predict"
+          notebook_task:
+            notebook_path: ../src/notebooks/07_bracket_picks.py
+
+    # ─── Post-round workflow: update + re-pick ───────────────────
+
+    round_refresh:
+      name: "[${bundle.target}] Bracketology - Round Refresh"
+      tasks:
+        - task_key: "06_update"
+          notebook_task:
+            notebook_path: ../src/notebooks/06_round_update.py
+
+        - task_key: "07_picks"
+          depends_on:
+            - task_key: "06_update"
+          notebook_task:
+            notebook_path: ../src/notebooks/07_bracket_picks.py

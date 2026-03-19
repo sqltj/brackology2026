@@ -17,6 +17,16 @@ Thumbs.db
 # Databricks
 y/
 .databricks-resources.json
+.databricks/
+
+# DAB build artifacts
+.databricks/bundle/
 
 # Claude
 .claude/
+
+# Playwright
+.playwright-mcp/
+
+# Bracket snapshot (large)
+bracket_snapshot.md

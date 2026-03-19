@@ -1,0 +1,29 @@
+bundle:
+  name: bracketology
+
+include:
+  - resources/*.yml
+
+variables:
+  catalog:
+    description: "Unity Catalog catalog for bracketology data"
+    default: "bracketology"
+  warehouse_id:
+    description: "SQL Warehouse ID (for future dashboard use)"
+    default: "6238930edfa85aee"
+
+targets:
+  dev:
+    default: true
+    mode: development
+    workspace:
+      profile: DEFAULT
+    variables:
+      catalog: "bracketology"
+
+  prod:
+    mode: production
+    workspace:
+      profile: DEFAULT
+    variables:
+      catalog: "bracketology"
