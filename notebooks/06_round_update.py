@@ -41,13 +41,24 @@ import matplotlib.pyplot as plt
 
 np.random.seed(42)
 
+def safe_int(v, default=0):
+    if isinstance(v, dict): return default
+    try: return int(v)
+    except: return default
+
+def safe_float(v, default=0.0):
+    if isinstance(v, dict): return default
+    try: return float(v)
+    except: return default
+
 ESPN_BASE = "site.api.espn.com/apis/site/v2/sports/basketball/mens-college-basketball"
+HDR = {"User-Agent": "Mozilla/5.0 (Macintosh)"}
 
 def espn_get(endpoint, params=None, retries=3):
     url = f"https://{ESPN_BASE}/{endpoint}"
     for attempt in range(retries):
         try:
-            resp = requests.get(url, params=params, timeout=30)
+            resp = requests.get(url, params=params, headers=HDR, timeout=30)
             resp.raise_for_status()
             return resp.json()
         except Exception as e:
@@ -87,9 +98,9 @@ def parse_scoreboard_games(data, season=2026):
             for c in comp.get("competitors", []):
                 prefix = "home" if c.get("homeAway") == "home" else "away"
                 team_data = c.get("team", {})
-                game[f"{prefix}_team_id"] = int(team_data.get("id", 0))
+                game[f"{prefix}_team_id"] = safe_int(team_data.get("id", 0))
                 game[f"{prefix}_team_name"] = team_data.get("displayName", "")
-                game[f"{prefix}_score"] = int(c.get("score", 0)) if c.get("score") else 0
+                game[f"{prefix}_score"] = safe_int(c.get("score", 0))
                 game[f"{prefix}_winner"] = c.get("winner", False)
 
                 # Extract seed
@@ -99,7 +110,7 @@ def parse_scoreboard_games(data, season=2026):
                 if seed_val is None and "seed" in c:
                     seed_val = c.get("seed")
                 if seed_val:
-                    game[f"{prefix}_seed"] = int(seed_val)
+                    game[f"{prefix}_seed"] = safe_int(seed_val)
 
             status = comp.get("status", {})
             game["status"] = status.get("type", {}).get("description", "")
@@ -211,8 +222,8 @@ current_elos = dict(zip(
 K_TOURNEY = 32
 
 for game in completed:
-    home_id = int(game.get("home_team_id", 0))
-    away_id = int(game.get("away_team_id", 0))
+    home_id = safe_int(game.get("home_team_id", 0))
+    away_id = safe_int(game.get("away_team_id", 0))
     home_score = game.get("home_score", 0)
     away_score = game.get("away_score", 0)
 
@@ -277,8 +288,8 @@ if completed:
 eliminated = set()
 
 for game in completed:
-    home_id = int(game.get("home_team_id", 0))
-    away_id = int(game.get("away_team_id", 0))
+    home_id = safe_int(game.get("home_team_id", 0))
+    away_id = safe_int(game.get("away_team_id", 0))
 
     if game.get("home_winner", False):
         eliminated.add(away_id)
@@ -310,10 +321,7 @@ X_train = matchup_df[FEATURE_COLS].fillna(0).values
 y_train = matchup_df["team_a_won"].values
 
 scaler = StandardScaler()
-scaler.mean_ = scaler_mean
-scaler.scale_ = scaler_scale
-scaler.var_ = scaler_scale ** 2
-scaler.n_features_in_ = len(FEATURE_COLS)
+scaler.fit(X_train)
 X_train_scaled = scaler.transform(X_train)
 
 lr_model = LogisticRegression(C=0.1, max_iter=1000, penalty="l2")
@@ -330,8 +338,8 @@ if completed and len(completed) >= 3:
     model_lls = {"lr": [], "xgb": [], "rf": []}
 
     for game in completed:
-        home_id = int(game.get("home_team_id", 0))
-        away_id = int(game.get("away_team_id", 0))
+        home_id = safe_int(game.get("home_team_id", 0))
+        away_id = safe_int(game.get("away_team_id", 0))
         actual = 1 if game.get("home_winner", False) else 0
 
         # Build features
@@ -351,24 +359,25 @@ if completed and len(completed) >= 3:
         feature_vals = []
         for f in FEATURE_COLS:
             if f == "elo_diff":
-                feature_vals.append(fh.get("elo", 1500) - fa.get("elo", 1500))
+                feature_vals.append(safe_float(fh.get("elo", 1500), 1500) - safe_float(fa.get("elo", 1500), 1500))
             elif f == "seed_diff":
-                feature_vals.append(fa.get("seed", 8) - fh.get("seed", 8))
+                feature_vals.append(safe_float(fa.get("seed", 8), 8) - safe_float(fh.get("seed", 8), 8))
             elif f.endswith("_diff"):
                 base = f.replace("_diff", "")
-                feature_vals.append(fh.get(base, 0) - fa.get(base, 0))
+                feature_vals.append(safe_float(fh.get(base, 0)) - safe_float(fa.get(base, 0)))
             elif f == "team_a_elo":
-                feature_vals.append(fh.get("elo", 1500))
+                feature_vals.append(safe_float(fh.get("elo", 1500), 1500))
             elif f == "team_b_elo":
-                feature_vals.append(fa.get("elo", 1500))
+                feature_vals.append(safe_float(fa.get("elo", 1500), 1500))
             elif f == "team_a_seed":
-                feature_vals.append(fh.get("seed", 8))
+                feature_vals.append(safe_float(fh.get("seed", 8), 8))
             elif f == "team_b_seed":
-                feature_vals.append(fa.get("seed", 8))
+                feature_vals.append(safe_float(fa.get("seed", 8), 8))
             else:
                 feature_vals.append(0)
 
         X_game = np.array([feature_vals])
+        X_game = np.nan_to_num(X_game, nan=0.0, posinf=0.0, neginf=0.0)
         X_game_scaled = (X_game - scaler_mean) / scaler_scale
 
         p_lr = float(np.clip(lr_model.predict_proba(X_game_scaled)[0, 1], 0.01, 0.99))
@@ -415,10 +424,8 @@ else:
 
 # Update team features with new Elos
 updated_features = features_df[features_df["season"] == 2026].copy()
-updated_features["elo"] = updated_features["team_id"].astype(int).map(
-    lambda tid: current_elos.get(tid, updated_features[updated_features["team_id"] == tid]["elo"].values[0]
-                                  if len(updated_features[updated_features["team_id"] == tid]) > 0 else 1500)
-)
+elo_map = {safe_int(tid): safe_float(elo, 1500) for tid, elo in current_elos.items()}
+updated_features["elo"] = updated_features["team_id"].apply(lambda tid: elo_map.get(safe_int(tid), 1500))
 
 # Recalculate SOS with updated Elos
 # (simplified: just update the Elo-based metrics)
@@ -426,6 +433,10 @@ updated_features["elo"] = updated_features["team_id"].astype(int).map(
 # Generate new pairwise probabilities for surviving teams
 surviving_list = sorted(surviving)
 new_pairwise = []
+
+seeds_lookup = dict(zip(seeds_2026["team_id"].astype(int), seeds_2026["seed"].astype(int)))
+teams_raw = spark.table("bracketology.raw.teams").toPandas()
+name_lookup = dict(zip(teams_raw["team_id"].astype(int), teams_raw["name"]))
 
 for i in range(len(surviving_list)):
     for j in range(i + 1, len(surviving_list)):
@@ -444,24 +455,25 @@ for i in range(len(surviving_list)):
         feature_vals = []
         for f in FEATURE_COLS:
             if f == "elo_diff":
-                feature_vals.append(current_elos.get(tid_a, 1500) - current_elos.get(tid_b, 1500))
+                feature_vals.append(safe_float(current_elos.get(tid_a, 1500), 1500) - safe_float(current_elos.get(tid_b, 1500), 1500))
             elif f == "seed_diff":
-                feature_vals.append(fb.get("seed", 8) - fa.get("seed", 8))
+                feature_vals.append(safe_float(fb.get("seed", 8), 8) - safe_float(fa.get("seed", 8), 8))
             elif f == "team_a_elo":
-                feature_vals.append(current_elos.get(tid_a, 1500))
+                feature_vals.append(safe_float(current_elos.get(tid_a, 1500), 1500))
             elif f == "team_b_elo":
-                feature_vals.append(current_elos.get(tid_b, 1500))
+                feature_vals.append(safe_float(current_elos.get(tid_b, 1500), 1500))
             elif f == "team_a_seed":
-                feature_vals.append(fa.get("seed", 8))
+                feature_vals.append(safe_float(fa.get("seed", 8), 8))
             elif f == "team_b_seed":
-                feature_vals.append(fb.get("seed", 8))
+                feature_vals.append(safe_float(fb.get("seed", 8), 8))
             elif f.endswith("_diff"):
                 base = f.replace("_diff", "")
-                feature_vals.append(fa.get(base, 0) - fb.get(base, 0))
+                feature_vals.append(safe_float(fa.get(base, 0)) - safe_float(fb.get(base, 0)))
             else:
                 feature_vals.append(0)
 
         X_pred = np.array([feature_vals])
+        X_pred = np.nan_to_num(X_pred, nan=0.0, posinf=0.0, neginf=0.0)
         X_pred_scaled = (X_pred - scaler_mean) / scaler_scale
 
         p_lr = float(np.clip(lr_model.predict_proba(X_pred_scaled)[0, 1], 0.01, 0.99))
@@ -475,17 +487,13 @@ for i in range(len(surviving_list)):
         )
         p_ensemble = float(np.clip(p_ensemble, 0.01, 0.99))
 
-        seeds_lookup = dict(zip(seeds_2026["team_id"].astype(int), seeds_2026["seed"].astype(int)))
-        teams_raw = spark.table("bracketology.raw.teams").toPandas()
-        name_lookup = dict(zip(teams_raw["team_id"].astype(int), teams_raw["name"]))
-
         new_pairwise.append({
             "team_a_id": tid_a,
             "team_a_name": name_lookup.get(tid_a, f"Team {tid_a}"),
-            "team_a_seed": int(seeds_lookup.get(tid_a, 0)),
+            "team_a_seed": safe_int(seeds_lookup.get(tid_a, 0)),
             "team_b_id": tid_b,
             "team_b_name": name_lookup.get(tid_b, f"Team {tid_b}"),
-            "team_b_seed": int(seeds_lookup.get(tid_b, 0)),
+            "team_b_seed": safe_int(seeds_lookup.get(tid_b, 0)),
             "p_team_a_wins": p_ensemble,
             "p_team_b_wins": 1 - p_ensemble,
         })
