@@ -32,6 +32,7 @@ import numpy as np
 import json
 import time
 import traceback
+import sys
 from datetime import datetime, timedelta
 from sklearn.linear_model import LogisticRegression
 from sklearn.ensemble import RandomForestClassifier
@@ -40,6 +41,9 @@ from sklearn.metrics import log_loss, accuracy_score
 import xgboost as xgb
 
 np.random.seed(42)
+
+def log(msg):
+    print(msg, flush=True)
 
 def safe_int(v, default=0):
     if isinstance(v, dict): return default
@@ -65,7 +69,7 @@ def espn_get(endpoint, params=None, retries=3):
             if attempt < retries - 1:
                 time.sleep(2 ** attempt)
             else:
-                print(f"Failed: {url} — {e}")
+                log(f"Failed: {url} — {e}")
                 return None
 
 # COMMAND ----------
@@ -76,50 +80,61 @@ def espn_get(endpoint, params=None, retries=3):
 # COMMAND ----------
 
 def parse_scoreboard_games(data, season=2026):
-    """Parse ESPN scoreboard into game records."""
+    """Parse ESPN scoreboard into game records with consistent schema."""
     games = []
     if not data or "events" not in data:
         return games
 
     for event in data.get("events", []):
+        # Every game dict must have the exact same keys
         game = {
-            "game_id": event.get("id", ""),
-            "date": event.get("date", ""),
-            "season": season,
-            "name": event.get("name", ""),
-            "short_name": event.get("shortName", ""),
+            "game_id": str(event.get("id", "")),
+            "date": str(event.get("date", "")),
+            "season": int(season),
+            "name": str(event.get("name", "")),
+            "short_name": str(event.get("shortName", "")),
             "neutral_site": False,
             "tournament_game": True,
+            "status": "",
+            "home_team_id": 0,
+            "home_team_name": "",
+            "home_score": 0,
+            "home_winner": False,
+            "home_seed": 0,
+            "away_team_id": 0,
+            "away_team_name": "",
+            "away_score": 0,
+            "away_winner": False,
+            "away_seed": 0,
         }
 
         for comp in event.get("competitions", []):
-            game["neutral_site"] = comp.get("neutralSite", False)
+            game["neutral_site"] = bool(comp.get("neutralSite", False))
 
             for c in comp.get("competitors", []):
                 prefix = "home" if c.get("homeAway") == "home" else "away"
                 team_data = c.get("team", {})
                 game[f"{prefix}_team_id"] = safe_int(team_data.get("id", 0))
-                game[f"{prefix}_team_name"] = team_data.get("displayName", "")
+                game[f"{prefix}_team_name"] = str(team_data.get("displayName", ""))
                 game[f"{prefix}_score"] = safe_int(c.get("score", 0))
-                game[f"{prefix}_winner"] = c.get("winner", False)
+                game[f"{prefix}_winner"] = bool(c.get("winner", False))
 
-                # Extract seed
                 seed_val = None
                 if "curatedRank" in c:
                     seed_val = c["curatedRank"].get("current")
                 if seed_val is None and "seed" in c:
                     seed_val = c.get("seed")
-                if seed_val:
-                    game[f"{prefix}_seed"] = safe_int(seed_val)
+                game[f"{prefix}_seed"] = safe_int(seed_val) if seed_val else 0
 
             status = comp.get("status", {})
-            game["status"] = status.get("type", {}).get("description", "")
+            game["status"] = str(status.get("type", {}).get("description", ""))
 
         games.append(game)
 
     return games
 
 # Fetch all tournament games (March 17 through April 9)
+log(">>> SECTION 1: Fetch tournament results from ESPN")
 all_tourney_games = []
 for month, days in [(3, range(17, 32)), (4, range(1, 10))]:
     for day in days:
@@ -133,14 +148,30 @@ for month, days in [(3, range(17, 32)), (4, range(1, 10))]:
 
 # Filter to completed games
 completed = [g for g in all_tourney_games if g.get("status") == "Final"]
-print(f"Total tournament games found: {len(all_tourney_games)}")
-print(f"Completed games: {len(completed)}")
+log(f"Total tournament games found: {len(all_tourney_games)}")
+log(f"Completed games: {len(completed)}")
 
 # Update the current_tourney_results table
 if completed:
-    ct_df = spark.createDataFrame(pd.DataFrame(completed))
-    ct_df.write.mode("overwrite").saveAsTable("bracketology.raw.current_tourney_results")
-    print("Updated bracketology.raw.current_tourney_results")
+    pdf = pd.DataFrame(completed)
+    # Explicit type casting to avoid Spark inference issues
+    pdf["game_id"] = pdf["game_id"].astype(str)
+    pdf["season"] = pdf["season"].astype(int)
+    pdf["home_team_id"] = pdf["home_team_id"].astype(int)
+    pdf["away_team_id"] = pdf["away_team_id"].astype(int)
+    pdf["home_score"] = pdf["home_score"].astype(int)
+    pdf["away_score"] = pdf["away_score"].astype(int)
+    pdf["home_seed"] = pdf["home_seed"].astype(int)
+    pdf["away_seed"] = pdf["away_seed"].astype(int)
+    pdf["home_winner"] = pdf["home_winner"].astype(bool)
+    pdf["away_winner"] = pdf["away_winner"].astype(bool)
+    pdf["neutral_site"] = pdf["neutral_site"].astype(bool)
+    pdf["tournament_game"] = pdf["tournament_game"].astype(bool)
+    ct_df = spark.createDataFrame(pdf)
+    ct_df.write.mode("overwrite").option("overwriteSchema", "true").saveAsTable("bracketology.raw.current_tourney_results")
+    log("Updated bracketology.raw.current_tourney_results")
+else:
+    log("No completed games yet — skipping table update")
 
 # COMMAND ----------
 
@@ -149,6 +180,7 @@ if completed:
 
 # COMMAND ----------
 
+log(">>> SECTION 2: Evaluate Model Performance")
 try:
     # Load model metadata and rebuild prediction capability
     metadata_raw = spark.table("bracketology.predictions.model_metadata").toPandas()
@@ -161,7 +193,7 @@ try:
     best_xgb_params = metadata["best_xgb_params"]
     for k in ["max_depth", "n_estimators", "min_child_weight"]:
         if k in best_xgb_params: best_xgb_params[k] = int(best_xgb_params[k])
-    print(f"Metadata loaded: {len(FEATURE_COLS)} features, XGB params: {best_xgb_params}")
+    log(f"Metadata loaded: {len(FEATURE_COLS)} features, XGB params: {best_xgb_params}")
 except Exception:
     traceback.print_exc()
     raise
@@ -200,16 +232,16 @@ if completed:
     avg_ll = round_df["log_loss_contribution"].mean()
     accuracy = round_df["correct"].mean()
 
-    print("=" * 65)
-    print(f"ROUND PERFORMANCE REPORT")
-    print("=" * 65)
-    print(f"  Games evaluated: {len(round_df)}")
-    print(f"  Average Log Loss: {avg_ll:.4f}")
-    print(f"  Accuracy: {accuracy:.1%}")
-    print(f"\nPer-game breakdown:")
+    log("=" * 65)
+    log("ROUND PERFORMANCE REPORT")
+    log("=" * 65)
+    log(f"  Games evaluated: {len(round_df)}")
+    log(f"  Average Log Loss: {avg_ll:.4f}")
+    log(f"  Accuracy: {accuracy:.1%}")
+    log(f"\nPer-game breakdown:")
     for _, g in round_df.iterrows():
         status = "CORRECT" if g["correct"] else "WRONG"
-        print(f"  {g['game']:<40s} P={g['predicted_home_win_prob']:.2f} [{status}] LL={g['log_loss_contribution']:.3f}")
+        log(f"  {g['game']:<40s} P={g['predicted_home_win_prob']:.2f} [{status}] LL={g['log_loss_contribution']:.3f}")
 
 # COMMAND ----------
 
@@ -218,6 +250,7 @@ if completed:
 
 # COMMAND ----------
 
+log(">>> SECTION 3: Update Elo Ratings")
 # Load current Elo ratings (latest per team from features)
 features_df = spark.table("bracketology.features.team_season_features").toPandas()
 current_elos = dict(zip(
@@ -256,7 +289,7 @@ for game in completed:
     current_elos[home_id] = home_elo + k * (s_home - e_home)
     current_elos[away_id] = away_elo + k * ((1 - s_home) - (1 - e_home))
 
-print(f"Updated Elo ratings for {len(current_elos)} teams")
+log(f"Updated Elo ratings for {len(current_elos)} teams")
 
 # Show biggest Elo movers
 if completed:
@@ -275,14 +308,14 @@ if completed:
             name = name[0] if len(name) > 0 else f"Team {tid}"
             movers.append({"team": name, "old_elo": old, "new_elo": new, "change": new - old})
 
-    movers_df = pd.DataFrame(movers).sort_values("change", ascending=False)
-    if len(movers_df) > 0:
-        print("\nBiggest Elo Movers After Tournament Games:")
+    if movers:
+        movers_df = pd.DataFrame(movers).sort_values("change", ascending=False)
+        log("\nBiggest Elo Movers After Tournament Games:")
         for _, m in movers_df.head(10).iterrows():
-            print(f"  {m['team']:<30s} {m['old_elo']:.0f} -> {m['new_elo']:.0f} ({m['change']:+.0f})")
-        print("  ...")
+            log(f"  {m['team']:<30s} {m['old_elo']:.0f} -> {m['new_elo']:.0f} ({m['change']:+.0f})")
+        log("  ...")
         for _, m in movers_df.tail(10).iterrows():
-            print(f"  {m['team']:<30s} {m['old_elo']:.0f} -> {m['new_elo']:.0f} ({m['change']:+.0f})")
+            log(f"  {m['team']:<30s} {m['old_elo']:.0f} -> {m['new_elo']:.0f} ({m['change']:+.0f})")
 
 # COMMAND ----------
 
@@ -291,6 +324,7 @@ if completed:
 
 # COMMAND ----------
 
+log(">>> SECTION 4: Identify Surviving Teams")
 # Determine which teams are still alive
 eliminated = set()
 
@@ -308,9 +342,9 @@ seeds_2026 = seeds_df[seeds_df["season"] == 2026]
 all_tourney_teams = set(seeds_2026["team_id"].astype(int).tolist())
 surviving = all_tourney_teams - eliminated
 
-print(f"Tournament field: {len(all_tourney_teams)} teams")
-print(f"Eliminated: {len(eliminated)}")
-print(f"Surviving: {len(surviving)}")
+log(f"Tournament field: {len(all_tourney_teams)} teams")
+log(f"Eliminated: {len(eliminated)}")
+log(f"Surviving: {len(surviving)}")
 
 # COMMAND ----------
 
@@ -322,12 +356,13 @@ print(f"Surviving: {len(surviving)}")
 
 # COMMAND ----------
 
+log(">>> SECTION 5: Re-weight Ensemble")
 try:
     # Rebuild models and evaluate each on completed tournament games
     matchup_df = spark.table("bracketology.features.matchup_features").toPandas()
     X_train = matchup_df[FEATURE_COLS].fillna(0).values.astype(float)
     y_train = matchup_df["team_a_won"].values.astype(int)
-    print(f"Training data: {X_train.shape}")
+    log(f"Training data: {X_train.shape}")
 
     scaler = StandardScaler()
     scaler.fit(X_train)
@@ -335,11 +370,11 @@ try:
 
     lr_model = LogisticRegression(C=0.1, max_iter=1000, penalty="l2")
     lr_model.fit(X_train_scaled, y_train)
-    print("LR trained")
+    log("LR trained")
 
     xgb_model = xgb.XGBClassifier(**best_xgb_params, eval_metric="logloss", use_label_encoder=False, random_state=42)
     xgb_model.fit(X_train, y_train)
-    print("XGB trained")
+    log("XGB trained")
 
     rf_model = RandomForestClassifier(n_estimators=200, max_depth=5, min_samples_leaf=10, random_state=42)
     rf_model.fit(X_train, y_train)
@@ -400,10 +435,10 @@ try:
             model_lls["rf"].append(-(actual * np.log(p_rf) + (1-actual) * np.log(1-p_rf)))
 
         avg_lls = {k: np.mean(v) for k, v in model_lls.items()}
-        print(f"Per-model tournament log loss:")
-        print(f"  LR:  {avg_lls['lr']:.4f}")
-        print(f"  XGB: {avg_lls['xgb']:.4f}")
-        print(f"  RF:  {avg_lls['rf']:.4f}")
+        log(f"Per-model tournament log loss:")
+        log(f"  LR:  {avg_lls['lr']:.4f}")
+        log(f"  XGB: {avg_lls['xgb']:.4f}")
+        log(f"  RF:  {avg_lls['rf']:.4f}")
 
         # Re-weight: inverse log loss (better model gets more weight)
         inv_lls = {k: 1.0 / v for k, v in avg_lls.items()}
@@ -419,16 +454,18 @@ try:
         updated_weights = blend_factor * old_weights + (1 - blend_factor) * new_weights
         updated_weights = updated_weights / updated_weights.sum()
 
-        print(f"\nWeight update:")
-        print(f"  Old weights: LR={old_weights[0]:.3f}, XGB={old_weights[1]:.3f}, RF={old_weights[2]:.3f}")
-        print(f"  New weights: LR={updated_weights[0]:.3f}, XGB={updated_weights[1]:.3f}, RF={updated_weights[2]:.3f}")
+        log(f"\nWeight update:")
+        log(f"  Old weights: LR={old_weights[0]:.3f}, XGB={old_weights[1]:.3f}, RF={old_weights[2]:.3f}")
+        log(f"  New weights: LR={updated_weights[0]:.3f}, XGB={updated_weights[1]:.3f}, RF={updated_weights[2]:.3f}")
     else:
         updated_weights = old_weights
-        print("Not enough completed games to re-weight ensemble — keeping original weights")
+        log("Not enough completed games to re-weight ensemble — keeping original weights")
 
 except Exception:
     traceback.print_exc()
     raise
+
+# COMMAND ----------
 
 # COMMAND ----------
 
@@ -437,6 +474,7 @@ except Exception:
 
 # COMMAND ----------
 
+log(">>> SECTION 6: Re-generate Predictions")
 try:
     # Update team features with new Elos
     updated_features = features_df[features_df["season"] == 2026].copy()
@@ -514,18 +552,27 @@ try:
                 "p_team_b_wins": 1 - p_ensemble,
             })
 
-    print(f"Generated {len(new_pairwise)} updated pairwise probabilities for {len(surviving)} surviving teams")
+    log(f"Generated {len(new_pairwise)} updated pairwise probabilities for {len(surviving)} surviving teams")
 except Exception:
     traceback.print_exc()
     raise
 
 # COMMAND ----------
 
-# Save updated predictions
+log(">>> SECTION 6b: Save updated predictions")
 if new_pairwise:
     new_pairwise_df = pd.DataFrame(new_pairwise)
+    # Explicit type casting for Spark
+    new_pairwise_df["team_a_id"] = new_pairwise_df["team_a_id"].astype(int)
+    new_pairwise_df["team_b_id"] = new_pairwise_df["team_b_id"].astype(int)
+    new_pairwise_df["team_a_seed"] = new_pairwise_df["team_a_seed"].astype(int)
+    new_pairwise_df["team_b_seed"] = new_pairwise_df["team_b_seed"].astype(int)
+    new_pairwise_df["p_team_a_wins"] = new_pairwise_df["p_team_a_wins"].astype(float)
+    new_pairwise_df["p_team_b_wins"] = new_pairwise_df["p_team_b_wins"].astype(float)
+
     new_pairwise_sdf = spark.createDataFrame(new_pairwise_df)
-    new_pairwise_sdf.write.mode("overwrite").saveAsTable("bracketology.predictions.pairwise_probabilities")
+    new_pairwise_sdf.write.mode("overwrite").option("overwriteSchema", "true").saveAsTable("bracketology.predictions.pairwise_probabilities")
+    log(f"Saved {len(new_pairwise)} pairwise probabilities")
 
     # Save round update log
     round_update = {
@@ -534,20 +581,24 @@ if new_pairwise:
         "teams_eliminated": len(eliminated),
         "teams_remaining": len(surviving),
         "ensemble_weights": updated_weights.tolist(),
-        "round_log_loss": float(avg_ll) if completed and 'avg_ll' in dir() else None,
-        "round_accuracy": float(accuracy) if completed and 'accuracy' in dir() else None,
+        "round_log_loss": float(avg_ll) if 'avg_ll' in dir() else None,
+        "round_accuracy": float(accuracy) if 'accuracy' in dir() else None,
     }
 
-    update_rows = [{"key": k, "value": json.dumps(v)} for k, v in round_update.items()]
-    update_df = spark.createDataFrame(pd.DataFrame(update_rows))
+    update_rows = [{"key": str(k), "value": json.dumps(v)} for k, v in round_update.items()]
+    update_pdf = pd.DataFrame(update_rows)
+    update_pdf["key"] = update_pdf["key"].astype(str)
+    update_pdf["value"] = update_pdf["value"].astype(str)
+    update_df = spark.createDataFrame(update_pdf)
 
-    # Append to round_updates (create or append)
     try:
         update_df.write.mode("append").saveAsTable("bracketology.predictions.round_updates")
     except Exception:
-        update_df.write.mode("overwrite").saveAsTable("bracketology.predictions.round_updates")
+        update_df.write.mode("overwrite").option("overwriteSchema", "true").saveAsTable("bracketology.predictions.round_updates")
 
-    print("Saved updated predictions and round log")
+    log("Saved updated predictions and round log")
+else:
+    log("No pairwise predictions to save")
 
 # COMMAND ----------
 
@@ -556,19 +607,14 @@ if new_pairwise:
 
 # COMMAND ----------
 
-# Show updated championship contenders
+log(">>> SECTION 7: Monte Carlo simulation")
 if new_pairwise:
-    # Re-run Monte Carlo with updated probabilities
     from collections import defaultdict
 
     n_sims = 10000
     champ_counts = defaultdict(int)
 
-    seeds_lookup = dict(zip(seeds_2026["team_id"].astype(int), seeds_2026["seed"].astype(int)))
-    teams_raw = spark.table("bracketology.raw.teams").toPandas()
-    name_lookup = dict(zip(teams_raw["team_id"].astype(int), teams_raw["name"]))
-
-    # Pairwise probability lookup
+    # Reuse lookups from earlier sections
     updated_prob_lookup = {}
     for _, row in new_pairwise_df.iterrows():
         a, b = safe_int(row["team_a_id"]), safe_int(row["team_b_id"])
@@ -576,6 +622,7 @@ if new_pairwise:
         updated_prob_lookup[(b, a)] = row["p_team_b_wins"]
 
     surviving_sorted = sorted(surviving, key=lambda t: seeds_lookup.get(t, 16))
+    log(f"Running {n_sims} simulations with {len(surviving_sorted)} teams...")
 
     for sim in range(n_sims):
         remaining = list(surviving_sorted)
@@ -595,10 +642,9 @@ if new_pairwise:
         if remaining:
             champ_counts[remaining[0]] += 1
 
-    # Display results
-    print("=" * 65)
-    print("UPDATED CHAMPIONSHIP ODDS (Post-Round Update)")
-    print("=" * 65)
+    log("=" * 65)
+    log("UPDATED CHAMPIONSHIP ODDS (Post-Round Update)")
+    log("=" * 65)
 
     sorted_contenders = sorted(champ_counts.items(), key=lambda x: x[1], reverse=True)
     for tid, count in sorted_contenders[:15]:
@@ -606,10 +652,12 @@ if new_pairwise:
         seed = seeds_lookup.get(tid, 0)
         name = name_lookup.get(tid, f"Team {tid}")
         bar = "#" * int(prob * 100)
-        print(f"  [{seed:2d}] {name:<30s} {prob:6.1%} {bar}")
+        log(f"  [{seed:2d}] {name:<30s} {prob:6.1%} {bar}")
 
     total_prob = sum(c / n_sims for _, c in sorted_contenders)
-    print(f"\n  Total probability: {total_prob:.4f}")
+    log(f"\n  Total probability: {total_prob:.4f}")
+else:
+    log("No updated predictions — skipping Monte Carlo")
 
 # COMMAND ----------
 
