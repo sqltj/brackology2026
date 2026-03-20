@@ -443,76 +443,76 @@ try:
     elo_map = {safe_int(tid): safe_float(elo, 1500) for tid, elo in current_elos.items()}
     updated_features["elo"] = updated_features["team_id"].apply(lambda tid: elo_map.get(safe_int(tid), 1500))
 
-# Recalculate SOS with updated Elos
-# (simplified: just update the Elo-based metrics)
+    # Recalculate SOS with updated Elos
+    # (simplified: just update the Elo-based metrics)
 
-# Generate new pairwise probabilities for surviving teams
-surviving_list = sorted(surviving)
-new_pairwise = []
+    # Generate new pairwise probabilities for surviving teams
+    surviving_list = sorted(surviving)
+    new_pairwise = []
 
-seeds_lookup = dict(zip(seeds_2026["team_id"].astype(int), seeds_2026["seed"].astype(int)))
-teams_raw = spark.table("bracketology.raw.teams").toPandas()
-name_lookup = dict(zip(teams_raw["team_id"].astype(int), teams_raw["name"]))
+    seeds_lookup = dict(zip(seeds_2026["team_id"].astype(int), seeds_2026["seed"].astype(int)))
+    teams_raw = spark.table("bracketology.raw.teams").toPandas()
+    name_lookup = dict(zip(teams_raw["team_id"].astype(int), teams_raw["name"]))
 
-for i in range(len(surviving_list)):
-    for j in range(i + 1, len(surviving_list)):
-        tid_a = surviving_list[i]
-        tid_b = surviving_list[j]
+    for i in range(len(surviving_list)):
+        for j in range(i + 1, len(surviving_list)):
+            tid_a = surviving_list[i]
+            tid_b = surviving_list[j]
 
-        fa = updated_features[updated_features["team_id"] == tid_a]
-        fb = updated_features[updated_features["team_id"] == tid_b]
+            fa = updated_features[updated_features["team_id"] == tid_a]
+            fb = updated_features[updated_features["team_id"] == tid_b]
 
-        if len(fa) == 0 or len(fb) == 0:
-            continue
+            if len(fa) == 0 or len(fb) == 0:
+                continue
 
-        fa = fa.iloc[0]
-        fb = fb.iloc[0]
+            fa = fa.iloc[0]
+            fb = fb.iloc[0]
 
-        feature_vals = []
-        for f in FEATURE_COLS:
-            if f == "elo_diff":
-                feature_vals.append(safe_float(current_elos.get(tid_a, 1500), 1500) - safe_float(current_elos.get(tid_b, 1500), 1500))
-            elif f == "seed_diff":
-                feature_vals.append(safe_float(fb.get("seed", 8), 8) - safe_float(fa.get("seed", 8), 8))
-            elif f == "team_a_elo":
-                feature_vals.append(safe_float(current_elos.get(tid_a, 1500), 1500))
-            elif f == "team_b_elo":
-                feature_vals.append(safe_float(current_elos.get(tid_b, 1500), 1500))
-            elif f == "team_a_seed":
-                feature_vals.append(safe_float(fa.get("seed", 8), 8))
-            elif f == "team_b_seed":
-                feature_vals.append(safe_float(fb.get("seed", 8), 8))
-            elif f.endswith("_diff"):
-                base = f.replace("_diff", "")
-                feature_vals.append(safe_float(fa.get(base, 0)) - safe_float(fb.get(base, 0)))
-            else:
-                feature_vals.append(0)
+            feature_vals = []
+            for f in FEATURE_COLS:
+                if f == "elo_diff":
+                    feature_vals.append(safe_float(current_elos.get(tid_a, 1500), 1500) - safe_float(current_elos.get(tid_b, 1500), 1500))
+                elif f == "seed_diff":
+                    feature_vals.append(safe_float(fb.get("seed", 8), 8) - safe_float(fa.get("seed", 8), 8))
+                elif f == "team_a_elo":
+                    feature_vals.append(safe_float(current_elos.get(tid_a, 1500), 1500))
+                elif f == "team_b_elo":
+                    feature_vals.append(safe_float(current_elos.get(tid_b, 1500), 1500))
+                elif f == "team_a_seed":
+                    feature_vals.append(safe_float(fa.get("seed", 8), 8))
+                elif f == "team_b_seed":
+                    feature_vals.append(safe_float(fb.get("seed", 8), 8))
+                elif f.endswith("_diff"):
+                    base = f.replace("_diff", "")
+                    feature_vals.append(safe_float(fa.get(base, 0)) - safe_float(fb.get(base, 0)))
+                else:
+                    feature_vals.append(0)
 
-        X_pred = np.array([feature_vals])
-        X_pred = np.nan_to_num(X_pred, nan=0.0, posinf=0.0, neginf=0.0)
-        X_pred_scaled = scaler.transform(X_pred)
+            X_pred = np.array([feature_vals])
+            X_pred = np.nan_to_num(X_pred, nan=0.0, posinf=0.0, neginf=0.0)
+            X_pred_scaled = scaler.transform(X_pred)
 
-        p_lr = float(np.clip(lr_model.predict_proba(X_pred_scaled)[0, 1], 0.01, 0.99))
-        p_xgb = float(np.clip(xgb_model.predict_proba(X_pred)[0, 1], 0.01, 0.99))
-        p_rf = float(np.clip(rf_model.predict_proba(X_pred)[0, 1], 0.01, 0.99))
+            p_lr = float(np.clip(lr_model.predict_proba(X_pred_scaled)[0, 1], 0.01, 0.99))
+            p_xgb = float(np.clip(xgb_model.predict_proba(X_pred)[0, 1], 0.01, 0.99))
+            p_rf = float(np.clip(rf_model.predict_proba(X_pred)[0, 1], 0.01, 0.99))
 
-        p_ensemble = float(
-            updated_weights[0] * p_lr +
-            updated_weights[1] * p_xgb +
-            updated_weights[2] * p_rf
-        )
-        p_ensemble = float(np.clip(p_ensemble, 0.01, 0.99))
+            p_ensemble = float(
+                updated_weights[0] * p_lr +
+                updated_weights[1] * p_xgb +
+                updated_weights[2] * p_rf
+            )
+            p_ensemble = float(np.clip(p_ensemble, 0.01, 0.99))
 
-        new_pairwise.append({
-            "team_a_id": tid_a,
-            "team_a_name": name_lookup.get(tid_a, f"Team {tid_a}"),
-            "team_a_seed": safe_int(seeds_lookup.get(tid_a, 0)),
-            "team_b_id": tid_b,
-            "team_b_name": name_lookup.get(tid_b, f"Team {tid_b}"),
-            "team_b_seed": safe_int(seeds_lookup.get(tid_b, 0)),
-            "p_team_a_wins": p_ensemble,
-            "p_team_b_wins": 1 - p_ensemble,
-        })
+            new_pairwise.append({
+                "team_a_id": tid_a,
+                "team_a_name": name_lookup.get(tid_a, f"Team {tid_a}"),
+                "team_a_seed": safe_int(seeds_lookup.get(tid_a, 0)),
+                "team_b_id": tid_b,
+                "team_b_name": name_lookup.get(tid_b, f"Team {tid_b}"),
+                "team_b_seed": safe_int(seeds_lookup.get(tid_b, 0)),
+                "p_team_a_wins": p_ensemble,
+                "p_team_b_wins": 1 - p_ensemble,
+            })
 
     print(f"Generated {len(new_pairwise)} updated pairwise probabilities for {len(surviving)} surviving teams")
 except Exception:
